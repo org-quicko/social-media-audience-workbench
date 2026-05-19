@@ -17,17 +17,12 @@ import { transformGoogle } from '@/lib/transformers/google'
 import { transformLinkedIn } from '@/lib/transformers/linkedin'
 import { transformTwitter } from '@/lib/transformers/twitter'
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Bump version whenever the stored shape changes to avoid deserialising old data. */
 const STORAGE_KEY = 'workbench_csv_v2'
-/** Raw source rows kept in memory (for raw-view table display) */
 const PREVIEW_LIMIT = 5_000
-/** Rows added to the table per scroll event */
 const DISPLAY_PAGE = 500
-/** Hard cap on table DOM rows — beyond this, export to see the rest */
 const MAX_DISPLAY_ROWS = 20_000
-/** Number of rows to buffer before running JSON-column detection */
 const JSON_DETECT_SAMPLE = 20
 
 /**
@@ -65,8 +60,6 @@ const PLATFORM_MIN_ROWS: Record<PlatformType, number> = {
   twitter: 100,
 }
 
-// ─── Platform metadata ────────────────────────────────────────────────────────
-
 const PLATFORMS: Array<{ value: PlatformType; label: string; logo: string }> = [
   {
     value: 'meta',
@@ -90,14 +83,8 @@ const PLATFORMS: Array<{ value: PlatformType; label: string; logo: string }> = [
   },
 ]
 
-// ─── Data types ───────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-/**
- * CsvData: what we keep in memory after streaming a file.
- *
- * previewRawRows  — first PREVIEW_LIMIT source rows verbatim (raw-view table)
- * canonicalRows   — ALL rows, pre-transformed to canonical shape (export + platform preview)
- */
 interface CsvData {
   mapping: ColumnMapping
   headers: string[]
@@ -111,20 +98,30 @@ interface CsvData {
 interface TableDisplay {
   headers: string[]
   rows: Record<string, string>[]
-  loadedUpto: number   // how many source rows have been transformed into `rows`
-  hasMore: boolean     // more rows available (hasn't hit MAX_DISPLAY_ROWS yet)
+  loadedUpto: number
+  hasMore: boolean
 }
 
-// ─── Pure helpers ─────────────────────────────────────────────────────────────
+type UploadState =
+  | { status: 'idle' }
+  | { status: 'reading'; label: string }
+  | { status: 'loaded'; data: CsvData }
+  | { status: 'error'; message: string }
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function assert(condition: unknown, msg?: string): asserts condition {
+  if (!condition) throw new Error(msg ?? 'Assertion failed')
+}
 
 function transformFor(platform: PlatformType, rows: CanonicalRow[]): PlatformFile {
   if (platform === 'meta') return transformMeta(rows)
   if (platform === 'google') return transformGoogle(rows)
   if (platform === 'linkedin') return transformLinkedIn(rows)
-  return transformTwitter(rows)
+  if (platform === 'twitter') return transformTwitter(rows)
+  throw new Error(`Unknown platform: ${platform}`)
 }
 
-/** Parse a platform CSV back to display rows keyed by the given headers. */
 function platformCsvToRows(
   csvContent: string,
   headers: string[],
@@ -139,7 +136,6 @@ function platformCsvToRows(
   })
 }
 
-/** Split an array into chunks of at most `size` elements. */
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
@@ -175,12 +171,11 @@ function downloadFile(content: string, filename: string) {
   URL.revokeObjectURL(url)
 }
 
-/** Compute the initial TableDisplay for the given data + platform. */
-function computeInitialDisplay(data: CsvData, platform: PlatformType | ''): TableDisplay {
-  const totalSource = platform ? data.canonicalRows.length : data.previewRawRows.length
+function computeInitialDisplay(data: CsvData, platform: PlatformType | null): TableDisplay {
+  const totalSource = platform !== null ? data.canonicalRows.length : data.previewRawRows.length
   const to = Math.min(DISPLAY_PAGE, totalSource, MAX_DISPLAY_ROWS)
 
-  if (!platform) {
+  if (platform === null) {
     return {
       headers: data.headers,
       rows: data.previewRawRows.slice(0, to),
@@ -193,9 +188,8 @@ function computeInitialDisplay(data: CsvData, platform: PlatformType | ''): Tabl
   const parsed = Papa.parse<Record<string, string>>(file.content, {
     header: true, skipEmptyLines: true,
   })
-  const headers = parsed.meta.fields ?? []
   return {
-    headers,
+    headers: parsed.meta.fields!,
     rows: parsed.data as Record<string, string>[],
     loadedUpto: to,
     hasMore: to < Math.min(totalSource, MAX_DISPLAY_ROWS),
@@ -205,74 +199,76 @@ function computeInitialDisplay(data: CsvData, platform: PlatformType | ''): Tabl
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [data, setData] = useState<CsvData | null>(null)
-  const [platform, setPlatform] = useState<PlatformType | ''>('')
-  const [isReading, setIsReading] = useState(false)
-  const [readingLabel, setReadingLabel] = useState('Reading file…')
-  const [parseError, setParseError] = useState<string | null>(null)
+  const [upload, setUpload] = useState<UploadState>({ status: 'idle' })
+  const [platform, setPlatform] = useState<PlatformType | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const [tableDisplay, setTableDisplay] = useState<TableDisplay>({
     headers: [], rows: [], loadedUpto: 0, hasMore: false,
   })
   const [isDisplayLoading, setIsDisplayLoading] = useState(false)
-  const [searchInput, setSearchInput] = useState('')   // immediate — bound to the input
-  const [searchQuery, setSearchQuery] = useState('')   // debounced — drives filtering
+  const [searchInput, setSearchInput] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const colRefs = useRef<Array<HTMLTableColElement | null>>([])
   const resizeDrag = useRef<{ header: string; colIndex: number; startX: number; startWidth: number; currentWidth: number } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // ── Restore small files from localStorage on mount ──────────────────────────
+  // Stable reference: null while not loaded, same object reference while loaded
+  const uploadData = upload.status === 'loaded' ? upload.data : null
+
+  // ── Restore from localStorage on mount ────────────────────────────────────
   useEffect(() => {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (!stored) return
+    let saved: { rawText: string; fileName: string; sizeBytes: number; mapping: ColumnMapping }
     try {
-      const stored = localStorage.getItem(STORAGE_KEY)
-      if (!stored) return
-      const { rawText, fileName, sizeBytes, mapping } = JSON.parse(stored)
-      const result = Papa.parse<Record<string, string>>(rawText, {
-        header: true, skipEmptyLines: true,
-        transformHeader: (h: string) => h.trim(),
-      })
-      if (!result.data.length || !result.meta.fields) return
-      const headers = result.meta.fields
-      // Re-derive mapping from scratch if not stored (old format fallback)
-      let restoredMapping: ColumnMapping = mapping
-      if (!restoredMapping) {
-        const jsonCols = detectJsonColumns(headers, result.data.slice(0, JSON_DETECT_SAMPLE))
-        const sourceColumns = buildSourceColumns(headers, jsonCols)
-        restoredMapping = autoDetectMapping(sourceColumns)
-      }
-      const canonicalRows = result.data.map(row => parseGenericRow(row, restoredMapping))
-      setData({
-        mapping: restoredMapping, headers,
+      saved = JSON.parse(stored)
+    } catch {
+      localStorage.removeItem(STORAGE_KEY)
+      return
+    }
+    const result = Papa.parse<Record<string, string>>(saved.rawText, {
+      header: true, skipEmptyLines: true,
+      transformHeader: (h: string) => h.trim(),
+    })
+    if (!result.data.length || !result.meta.fields) {
+      localStorage.removeItem(STORAGE_KEY)
+      return
+    }
+    const headers = result.meta.fields
+    const canonicalRows = result.data.map(row => parseGenericRow(row, saved.mapping))
+    setUpload({
+      status: 'loaded',
+      data: {
+        mapping: saved.mapping, headers,
         previewRawRows: result.data.slice(0, PREVIEW_LIMIT),
         canonicalRows,
         rowCount: result.data.length,
-        fileName, sizeBytes,
-      })
-    } catch { /* start fresh */ }
+        fileName: saved.fileName,
+        sizeBytes: saved.sizeBytes,
+      },
+    })
   }, [])
 
-  // ── Reset search whenever data or platform changes ──────────────────────────
-  useEffect(() => { setSearchInput(''); setSearchQuery('') }, [data, platform])
+  // ── Reset search when data or platform changes ─────────────────────────────
+  useEffect(() => { setSearchInput(''); setSearchQuery('') }, [uploadData, platform])
 
-  // ── Debounce searchInput → searchQuery (250 ms) ─────────────────────────────
+  // ── Debounce search (250 ms) ───────────────────────────────────────────────
   useEffect(() => {
     const id = setTimeout(() => setSearchQuery(searchInput), 250)
     return () => clearTimeout(id)
   }, [searchInput])
 
-  // ── Reset column widths whenever the displayed headers change ───────────────
+  // ── Reset column widths when displayed headers change ─────────────────────
   useEffect(() => { setColWidths({}) }, [tableDisplay.headers])
 
-  // ── Column resize — bypass React during drag for zero-lag response ──────────
-  // onMove writes directly to the <col> DOM node (no re-render).
-  // onUp commits the final width to React state once (triggers one re-render).
+  // ── Column resize — bypass React during drag for zero-lag response ─────────
+  // onMove writes directly to the <col> DOM node; onUp commits once to state.
   useEffect(() => {
     function onMove(e: PointerEvent) {
       const drag = resizeDrag.current
       if (!drag) return
-      const delta = e.clientX - drag.startX
-      const newWidth = Math.max(60, drag.startWidth + delta)
+      const newWidth = Math.max(60, drag.startWidth + (e.clientX - drag.startX))
       drag.currentWidth = newWidth
       const col = colRefs.current[drag.colIndex]
       if (col) col.style.width = `${newWidth}px`
@@ -291,83 +287,44 @@ export default function Home() {
     }
   }, [])
 
-  // ── Recompute initial display whenever data or platform changes ─────────────
+  // ── Recompute display when data or platform changes ────────────────────────
+  // Depends on uploadData (stable ref) not upload, so label updates don't re-fire.
   useEffect(() => {
-    if (!data) {
+    if (!uploadData) {
       setTableDisplay({ headers: [], rows: [], loadedUpto: 0, hasMore: false })
       setIsDisplayLoading(false)
       return
     }
     setIsDisplayLoading(true)
-    // Wait one frame so the spinner actually paints before the compute blocks the thread
+    // One frame so the spinner paints before the compute blocks the thread
     const id = setTimeout(() => {
       try {
-        setTableDisplay(computeInitialDisplay(data, platform))
+        setTableDisplay(computeInitialDisplay(uploadData, platform))
       } finally {
         setIsDisplayLoading(false)
       }
     }, 16)
-    // Cleanup: only cancel the pending timer — do NOT call setIsDisplayLoading(false) here,
-    // because the cleanup fires when the dep changes and the next effect immediately sets it
-    // back to true. Calling false here creates a flicker and can leave the spinner stuck.
     return () => { clearTimeout(id) }
-  }, [data, platform])
+  }, [uploadData, platform])
 
-  // ── Infinite scroll: append more rows when user reaches the bottom ──────────
-  function loadMoreRows() {
-    if (!data) return
-    setTableDisplay(prev => {
-      if (!prev.hasMore) return prev
-
-      const totalSource = platform ? data.canonicalRows.length : data.previewRawRows.length
-      const displayMax = Math.min(totalSource, MAX_DISPLAY_ROWS)
-      const from = prev.loadedUpto
-      if (from >= displayMax) return { ...prev, hasMore: false }
-
-      const to = Math.min(from + DISPLAY_PAGE, displayMax)
-
-      if (!platform) {
-        const newRows = data.previewRawRows.slice(from, to)
-        return { ...prev, rows: [...prev.rows, ...newRows], loadedUpto: to, hasMore: to < displayMax }
-      }
-
-      // All platforms — transform batch, map to established headers
-      const file = transformFor(platform, data.canonicalRows.slice(from, to))
-      const newRows = platformCsvToRows(file.content, prev.headers)
-      return {
-        ...prev,
-        rows: [...prev.rows, ...newRows],
-        loadedUpto: to,
-        hasMore: to < displayMax,
-      }
-    })
-  }
-
-  // ── When search activates, eagerly fill tableDisplay up to MAX_DISPLAY_ROWS ──
-  // so the query runs over the full visible dataset, not just the loaded page.
+  // ── When search activates, eagerly fill to MAX_DISPLAY_ROWS ───────────────
   useEffect(() => {
-    if (!searchQuery || !data || !tableDisplay.hasMore) return
-
+    if (!searchQuery || !uploadData || !tableDisplay.hasMore) return
     setTableDisplay(prev => {
       if (!prev.hasMore) return prev
-      const totalSource = platform ? data.canonicalRows.length : data.previewRawRows.length
+      const totalSource = platform !== null ? uploadData.canonicalRows.length : uploadData.previewRawRows.length
       const displayMax = Math.min(totalSource, MAX_DISPLAY_ROWS)
       const from = prev.loadedUpto
-
-      if (!platform) {
-        const newRows = data.previewRawRows.slice(from, displayMax)
-        return { ...prev, rows: [...prev.rows, ...newRows], loadedUpto: displayMax, hasMore: false }
+      if (platform === null) {
+        return { ...prev, rows: [...prev.rows, ...uploadData.previewRawRows.slice(from, displayMax)], loadedUpto: displayMax, hasMore: false }
       }
-
-      // Transform all remaining rows in one go
-      const file = transformFor(platform, data.canonicalRows.slice(from, displayMax))
-      const newRows = platformCsvToRows(file.content, prev.headers)
-      return { ...prev, rows: [...prev.rows, ...newRows], loadedUpto: displayMax, hasMore: false }
+      const file = transformFor(platform, uploadData.canonicalRows.slice(from, displayMax))
+      return { ...prev, rows: [...prev.rows, ...platformCsvToRows(file.content, prev.headers)], loadedUpto: displayMax, hasMore: false }
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery])
 
-  // ── Filtered rows (derived — no extra state) ────────────────────────────────
+  // ── Filtered rows (derived — no extra state) ───────────────────────────────
   const filteredRows = useMemo(() => {
     if (!searchQuery.trim()) return tableDisplay.rows
     const q = searchQuery.toLowerCase()
@@ -378,25 +335,30 @@ export default function Home() {
 
   function handleScroll(e: React.UIEvent<HTMLElement>) {
     const el = e.currentTarget
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) {
-      loadMoreRows()
-    }
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) loadMoreRows()
   }
 
-  // ── File loading (streaming) ──────────────────────────────────────────────
-  //
-  // Single-pass streaming: the first JSON_DETECT_SAMPLE rows are buffered so
-  // detectJsonColumns() can inspect actual cell values (needed to recognise
-  // columns like Listmonk's `attribs` that contain JSON objects). Once the
-  // sample is full the mapping is fixed and buffered rows are flushed; every
-  // subsequent row is processed directly. Files shorter than JSON_DETECT_SAMPLE
-  // are handled in the complete() callback.
+  function loadMoreRows() {
+    if (!uploadData) return
+    setTableDisplay(prev => {
+      if (!prev.hasMore) return prev
+      const totalSource = platform !== null ? uploadData.canonicalRows.length : uploadData.previewRawRows.length
+      const displayMax = Math.min(totalSource, MAX_DISPLAY_ROWS)
+      const from = prev.loadedUpto
+      if (from >= displayMax) return { ...prev, hasMore: false }
+      const to = Math.min(from + DISPLAY_PAGE, displayMax)
+      if (platform === null) {
+        return { ...prev, rows: [...prev.rows, ...uploadData.previewRawRows.slice(from, to)], loadedUpto: to, hasMore: to < displayMax }
+      }
+      const file = transformFor(platform, uploadData.canonicalRows.slice(from, to))
+      return { ...prev, rows: [...prev.rows, ...platformCsvToRows(file.content, prev.headers)], loadedUpto: to, hasMore: to < displayMax }
+    })
+  }
+
+  // ── File loading (streaming) ───────────────────────────────────────────────
   function loadFile(file: File) {
-    setIsReading(true)
-    setReadingLabel('Reading file…')
-    setParseError(null)
-    setPlatform('')
-    setData(null)
+    setUpload({ status: 'reading', label: 'Reading file…' })
+    setPlatform(null)
 
     let headers: string[] = []
     let fieldMap: Map<string, string> | null = null
@@ -409,8 +371,7 @@ export default function Home() {
 
     function applySetup(rows: Record<string, string>[]) {
       const jsonCols = detectJsonColumns(headers, rows)
-      const sourceColumns = buildSourceColumns(headers, jsonCols)
-      mapping = autoDetectMapping(sourceColumns)
+      mapping = autoDetectMapping(buildSourceColumns(headers, jsonCols))
       setupDone = true
     }
 
@@ -424,9 +385,8 @@ export default function Home() {
       skipEmptyLines: true,
       worker: true,
       step: (result) => {
-        // On the very first row, capture (and optionally remap) headers
         if (headers.length === 0) {
-          const rawFields = result.meta.fields ?? []
+          const rawFields = result.meta.fields!
           headers = rawFields.map(h => h.trim())
           const needsRemap = rawFields.some((raw, i) => raw !== headers[i])
           if (needsRemap) fieldMap = new Map(rawFields.map((raw, i) => [raw, headers[i]]))
@@ -451,49 +411,46 @@ export default function Home() {
 
         progressTick++
         if (progressTick % 100_000 === 0) {
-          setReadingLabel(`Reading file… ${progressTick.toLocaleString()} rows`)
+          setUpload({ status: 'reading', label: `Reading file… ${progressTick.toLocaleString()} rows` })
         }
       },
       complete: () => {
-        // Flush any remaining buffered rows (file had < JSON_DETECT_SAMPLE rows)
         if (!setupDone && sampleBuffer.length > 0) {
           applySetup(sampleBuffer)
           for (const r of sampleBuffer) processRow(r)
         }
 
         if (canonicalRows.length === 0) {
-          setParseError('The file could not be parsed. Check that it is a valid CSV with headers.')
-          setIsReading(false)
+          setUpload({ status: 'error', message: 'The file could not be parsed. Check that it is a valid CSV with headers.' })
           return
         }
-        setData({
+
+        const data: CsvData = {
           mapping, headers,
           previewRawRows, canonicalRows,
           rowCount: canonicalRows.length,
           fileName: file.name,
           sizeBytes: file.size,
-        })
-        setParseError(null)
-        setIsReading(false)
-        // Persist raw text for small files so refresh doesn't lose data
+        }
+        setUpload({ status: 'loaded', data })
+
         if (file.size < 10 * 1024 * 1024) {
           const reader = new FileReader()
           reader.onload = e => {
             try {
               localStorage.setItem(STORAGE_KEY, JSON.stringify({
-                rawText: e.target?.result as string,
+                rawText: (e.target as FileReader).result as string,
                 fileName: file.name,
                 sizeBytes: file.size,
                 mapping,
               }))
-            } catch { /* quota */ }
+            } catch { /* quota exceeded */ }
           }
           reader.readAsText(file)
         }
       },
       error: (err) => {
-        setParseError(`Failed to read the file: ${err.message ?? 'unknown error'}`)
-        setIsReading(false)
+        setUpload({ status: 'error', message: `Failed to read the file: ${err.message}` })
       },
     })
   }
@@ -510,33 +467,26 @@ export default function Home() {
     if (f) loadFile(f)
   }
 
-  // ── Export with automatic file splitting ────────────────────────────────────
+  // ── Export with automatic file splitting ───────────────────────────────────
   async function handleExport() {
-    if (!data || !platform || isExporting) return
+    assert(uploadData !== null && platform !== null)
     setIsExporting(true)
-
-    // Yield to React so the button label updates to "Exporting…" before blocking work
     await new Promise(r => setTimeout(r, 0))
-
     try {
-      const limit = PLATFORM_ROW_LIMIT[platform]
-      const rows = data.canonicalRows
-
-      const chunks = chunk(rows, limit)
-
+      const chunks = chunk(uploadData.canonicalRows, PLATFORM_ROW_LIMIT[platform])
       if (chunks.length === 1) {
         const file = transformFor(platform, chunks[0])
         downloadFile(file.content, file.filename)
       } else {
-        const base =
-          platform === 'meta' ? 'meta_audience' :
-          platform === 'google' ? 'google_audience' :
-          platform === 'linkedin' ? 'linkedin_audience' :
-          'twitter_audience'
-        const files = chunks.map((c, i) => {
-          const f = transformFor(platform, c)
-          return { filename: `${base}_${i + 1}.csv`, content: f.content }
-        })
+        const file0 = transformFor(platform, chunks[0])
+        const base = file0.filename.replace('.csv', '')
+        const files = [
+          { filename: `${base}_1.csv`, content: file0.content },
+          ...chunks.slice(1).map((c, i) => {
+            const f = transformFor(platform, c)
+            return { filename: `${base}_${i + 2}.csv`, content: f.content }
+          }),
+        ]
         await downloadZipFiles(files, `${base}.zip`)
       }
     } finally {
@@ -545,41 +495,35 @@ export default function Home() {
   }
 
   function clearData() {
-    setData(null)
-    setPlatform('')
-    try { localStorage.removeItem(STORAGE_KEY) } catch {}
+    setUpload({ status: 'idle' })
+    setPlatform(null)
+    localStorage.removeItem(STORAGE_KEY)
   }
 
-  // ─── Render helpers ──────────────────────────────────────────────────────────
+  // ─── Derived render values ─────────────────────────────────────────────────
 
-  const selectedPlatform = PLATFORMS.find(p => p.value === platform)
-  // Use the true row count (not the preview-capped slice) so atDisplayCap is accurate
-  const totalSource = data
-    ? (platform ? data.canonicalRows.length : data.rowCount)
+  const selectedPlatform = platform !== null ? PLATFORMS.find(p => p.value === platform)! : null
+  const totalSource = uploadData
+    ? (platform !== null ? uploadData.canonicalRows.length : uploadData.rowCount)
     : 0
   const atDisplayCap = tableDisplay.loadedUpto >= MAX_DISPLAY_ROWS && MAX_DISPLAY_ROWS < totalSource
-  // Raw view is capped at PREVIEW_LIMIT rows; show a hint once all preview rows are loaded
-  const rawViewCapped = !!data && !platform && !tableDisplay.hasMore && data.rowCount > PREVIEW_LIMIT
-  const minRows = platform ? PLATFORM_MIN_ROWS[platform] : 0
-  const belowMinimum = !!data && !!platform && data.canonicalRows.length < minRows
+  const rawViewCapped = !!uploadData && platform === null && !tableDisplay.hasMore && uploadData.rowCount > PREVIEW_LIMIT
+  const minRows = platform !== null ? PLATFORM_MIN_ROWS[platform] : 0
+  const belowMinimum = !!uploadData && platform !== null && uploadData.canonicalRows.length < minRows
 
-  function exportLabel() {
-    if (isExporting) return 'Exporting…'
-    if (!data || !platform) return 'Export CSV'
-    const limit = PLATFORM_ROW_LIMIT[platform]
-    const chunks = Math.ceil(data.canonicalRows.length / limit)
-    if (chunks > 1) return `Export ${chunks} files`
-    return 'Export CSV'
+  let exportLabel = 'Export CSV'
+  if (isExporting) {
+    exportLabel = 'Exporting…'
+  } else if (uploadData && platform !== null) {
+    const chunks = Math.ceil(uploadData.canonicalRows.length / PLATFORM_ROW_LIMIT[platform])
+    if (chunks > 1) exportLabel = `Export ${chunks} files`
   }
 
-  // ─── Render ───────────────────────────────────────────────────────────────────
-  // Single root return — the hidden file input is always mounted here so
-  // inputRef.current is never null regardless of which screen is visible.
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div className="h-screen flex flex-col bg-[#f5f5f5]">
-      {/* Always-mounted file input. Uses opacity/size hiding instead of display:none
-          so that programmatic .click() works reliably in Electron's renderer. */}
+      {/* Always-mounted file input — opacity hiding so .click() works in Electron */}
       <input
         ref={inputRef}
         type="file"
@@ -588,21 +532,21 @@ export default function Home() {
         onChange={handleInputChange}
       />
 
-      {/* ── Loading screen ── */}
-      {isReading && (
+      {/* ── Loading ── */}
+      {upload.status === 'reading' && (
         <>
           <header className="bg-white border-b border-border px-6 h-14 flex items-center">
             <span className="text-sm font-semibold text-[#111827]">Ads Audience Workbench</span>
           </header>
           <main className="flex-1 flex flex-col items-center justify-center gap-3">
             <Loader2 className="w-7 h-7 text-[#9ca3af] animate-spin" />
-            <p className="text-[13px] text-[#6b7280]">{readingLabel}</p>
+            <p className="text-[13px] text-[#6b7280]">{upload.label}</p>
           </main>
         </>
       )}
 
-      {/* ── Empty / error state ── */}
-      {!isReading && !data && (
+      {/* ── Idle / error ── */}
+      {(upload.status === 'idle' || upload.status === 'error') && (
         <>
           <header className="bg-white border-b border-border px-6 h-14 flex items-center">
             <span className="text-sm font-semibold text-[#111827]">Ads Audience Workbench</span>
@@ -612,17 +556,17 @@ export default function Home() {
             onDragOver={e => e.preventDefault()}
             onDrop={handleDrop}
           >
-            {parseError ? (
+            {upload.status === 'error' ? (
               <div className="flex flex-col items-center gap-4 text-center max-w-sm">
                 <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
                   <X className="w-5 h-5 text-red-500" />
                 </div>
                 <div>
                   <p className="font-semibold text-[15px] text-[#111827]">Could not read file</p>
-                  <p className="text-[13px] text-[#6b7280] mt-1">{parseError}</p>
+                  <p className="text-[13px] text-[#6b7280] mt-1">{upload.message}</p>
                 </div>
                 <Button
-                  onClick={() => { setParseError(null); inputRef.current?.click() }}
+                  onClick={() => { setUpload({ status: 'idle' }); inputRef.current?.click() }}
                   className="gap-2 mt-1 bg-[#111827] hover:bg-[#1f2937] text-white text-[13px] h-9 px-4 rounded-lg"
                 >
                   <Upload className="w-3.5 h-3.5" />
@@ -652,204 +596,201 @@ export default function Home() {
       )}
 
       {/* ── Data loaded ── */}
-      {!isReading && data && (
+      {uploadData && (
         <>
         {/* Header */}
         <header className="bg-white border-b border-border px-6 h-14 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={clearData}
-            className="text-sm font-semibold text-[#111827] hover:text-[#374151] transition-colors"
-          >
-            Ads Audience Workbench
-          </button>
-          <span className="text-[#d1d5db]">/</span>
-          <span className="text-sm text-[#6b7280]">{data.fileName}</span>
-          <span className="text-[12px] text-[#9ca3af] tabular-nums">
-            {data.rowCount.toLocaleString()} rows · {data.headers.length} columns
-          </span>
-          <button
-            onClick={() => inputRef.current?.click()}
-            className="text-[12px] text-[#9ca3af] hover:text-[#374151] underline underline-offset-2 transition-colors ml-1"
-          >
-            Upload new
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <div className="flex items-center">
-            <Select value={platform} onValueChange={v => setPlatform(v as PlatformType)}>
-              <SelectTrigger className="w-48 h-9 text-[13px] border-[#e5e7eb] text-[#374151] rounded-r-none border-r-0">
-                {platform && selectedPlatform ? (
-                  <div className="flex items-center gap-2">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={selectedPlatform.logo} alt={selectedPlatform.label} width={14} height={14} className="shrink-0" />
-                    <span>{selectedPlatform.label}</span>
-                  </div>
-                ) : (
-                  <span className="text-[#9ca3af]">Choose platform</span>
-                )}
-              </SelectTrigger>
-              <SelectContent>
-                {PLATFORMS.map(p => (
-                  <SelectItem key={p.value} value={p.value} className="text-[13px]">
-                    <div className="flex items-center gap-2.5">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={p.logo} alt={p.label} width={14} height={14} className="shrink-0" />
-                      <span>{p.label}</span>
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="flex items-center gap-2.5">
             <button
-              onClick={() => setPlatform('')}
-              className={[
-                'h-9 w-9 flex items-center justify-center border border-[#e5e7eb] rounded-r-md transition-colors shrink-0',
-                platform
-                  ? 'text-[#6b7280] hover:text-[#111827] hover:bg-[#f9fafb] bg-white'
-                  : 'text-[#d1d5db] bg-[#f9fafb] cursor-default pointer-events-none',
-              ].join(' ')}
-              title="Clear platform selection"
-              disabled={!platform}
+              onClick={clearData}
+              className="text-sm font-semibold text-[#111827] hover:text-[#374151] transition-colors"
             >
-              <X className="w-3.5 h-3.5" />
+              Ads Audience Workbench
+            </button>
+            <span className="text-[#d1d5db]">/</span>
+            <span className="text-sm text-[#6b7280]">{uploadData.fileName}</span>
+            <span className="text-[12px] text-[#9ca3af] tabular-nums">
+              {uploadData.rowCount.toLocaleString()} rows · {uploadData.headers.length} columns
+            </span>
+            <button
+              onClick={() => inputRef.current?.click()}
+              className="text-[12px] text-[#9ca3af] hover:text-[#374151] underline underline-offset-2 transition-colors ml-1"
+            >
+              Upload new
             </button>
           </div>
 
-          <Button
-            size="sm"
-            className="gap-1.5 h-9 text-[13px] bg-[#111827] hover:bg-[#1f2937] text-white px-3.5 rounded-lg"
-            onClick={handleExport}
-            disabled={!platform || isExporting}
-          >
-            {isExporting ? (
-              <><Loader2 className="w-3.5 h-3.5 animate-spin" />Exporting…</>
-            ) : (
-              <><Download className="w-3.5 h-3.5" />{exportLabel()}</>
-            )}
-          </Button>
-        </div>
-      </header>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center">
+              <Select value={platform ?? ''} onValueChange={v => setPlatform(v as PlatformType)}>
+                <SelectTrigger className="w-48 h-9 text-[13px] border-[#e5e7eb] text-[#374151] rounded-r-none border-r-0">
+                  {platform !== null && selectedPlatform ? (
+                    <div className="flex items-center gap-2">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={selectedPlatform.logo} alt={selectedPlatform.label} width={14} height={14} className="shrink-0" />
+                      <span>{selectedPlatform.label}</span>
+                    </div>
+                  ) : (
+                    <span className="text-[#9ca3af]">Choose platform</span>
+                  )}
+                </SelectTrigger>
+                <SelectContent>
+                  {PLATFORMS.map(p => (
+                    <SelectItem key={p.value} value={p.value} className="text-[13px]">
+                      <div className="flex items-center gap-2.5">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={p.logo} alt={p.label} width={14} height={14} className="shrink-0" />
+                        <span>{p.label}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <button
+                onClick={() => setPlatform(null)}
+                className={[
+                  'h-9 w-9 flex items-center justify-center border border-[#e5e7eb] rounded-r-md transition-colors shrink-0',
+                  platform !== null
+                    ? 'text-[#6b7280] hover:text-[#111827] hover:bg-[#f9fafb] bg-white'
+                    : 'text-[#d1d5db] bg-[#f9fafb] cursor-default pointer-events-none',
+                ].join(' ')}
+                title="Clear platform selection"
+                disabled={platform === null}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
 
-      {/* Search toolbar */}
-      <div className="bg-white border-b border-[#e5e7eb] px-4 py-2 shrink-0 flex items-center gap-2">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#9ca3af] pointer-events-none" />
-          <input
-            type="text"
-            value={searchInput}
-            onChange={e => setSearchInput(e.target.value)}
-            placeholder="Search rows…"
-            className="w-full h-8 pl-8 pr-8 text-[13px] border border-[#e5e7eb] rounded-md bg-[#f9fafb] text-[#374151] placeholder:text-[#9ca3af] focus:outline-none focus:ring-1 focus:ring-[#111827] focus:border-[#111827]"
-          />
-          {searchInput && (
-            <button
-              onClick={() => setSearchInput('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-[#9ca3af] hover:text-[#374151]"
+            <Button
+              size="sm"
+              className="gap-1.5 h-9 text-[13px] bg-[#111827] hover:bg-[#1f2937] text-white px-3.5 rounded-lg"
+              onClick={handleExport}
+              disabled={platform === null || isExporting}
             >
-              <X className="w-3 h-3" />
-            </button>
+              {isExporting ? (
+                <><Loader2 className="w-3.5 h-3.5 animate-spin" />Exporting…</>
+              ) : (
+                <><Download className="w-3.5 h-3.5" />{exportLabel}</>
+              )}
+            </Button>
+          </div>
+        </header>
+
+        {/* Search toolbar */}
+        <div className="bg-white border-b border-[#e5e7eb] px-4 py-2 shrink-0 flex items-center gap-2">
+          <div className="relative flex-1 max-w-sm">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#9ca3af] pointer-events-none" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+              placeholder="Search rows…"
+              className="w-full h-8 pl-8 pr-8 text-[13px] border border-[#e5e7eb] rounded-md bg-[#f9fafb] text-[#374151] placeholder:text-[#9ca3af] focus:outline-none focus:ring-1 focus:ring-[#111827] focus:border-[#111827]"
+            />
+            {searchInput && (
+              <button
+                onClick={() => setSearchInput('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#9ca3af] hover:text-[#374151]"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+          {searchQuery && (
+            <span className="text-[12px] text-[#6b7280] tabular-nums shrink-0">
+              {filteredRows.length.toLocaleString()} {filteredRows.length === 1 ? 'match' : 'matches'}
+              {tableDisplay.hasMore && ' (loading…)'}
+            </span>
           )}
         </div>
-        {searchQuery && (
-          <span className="text-[12px] text-[#6b7280] tabular-nums shrink-0">
-            {filteredRows.length.toLocaleString()} {filteredRows.length === 1 ? 'match' : 'matches'}
-            {tableDisplay.hasMore && ' (loading…)'}
-          </span>
-        )}
-      </div>
 
-      {/* Table */}
-      <main className="flex-1 overflow-auto relative" onScroll={handleScroll}>
-        {isDisplayLoading ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#f5f5f5]">
-            <Loader2 className="w-6 h-6 text-[#9ca3af] animate-spin" />
-          </div>
-        ) : (
-          <>
-            {belowMinimum && (
-              <div className="sticky top-0 z-20 bg-[#fffbeb] border-b border-[#fcd34d] px-4 py-2 text-[12px] text-[#92400e]">
-                {selectedPlatform?.label} requires a minimum of {minRows.toLocaleString()} rows per audience file — this file has only {data!.canonicalRows.length.toLocaleString()} {data!.canonicalRows.length === 1 ? 'row' : 'rows'} and the audience will not serve.
-              </div>
-            )}
-            {platform === 'twitter' && (
-              <div className="sticky top-0 z-20 bg-[#f0f9ff] border-b border-[#bae6fd] px-4 py-2 text-[12px] text-[#0369a1]">
-                X (Twitter) Ads accepts all identifier types in one file. During upload you&rsquo;ll map each column to its type (Email Address, Phone Number, Mobile Ad ID) — select <em>Do not upload data</em> for any column you want to skip.
-              </div>
-            )}
-          <table className="border-collapse" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
-            {/* colgroup drives all column widths — updated directly during drag (no re-render) */}
-            <colgroup>
-              <col style={{ width: 40 }} />
-              {tableDisplay.headers.map((h, i) => (
-                <col
-                  key={h}
-                  ref={el => { colRefs.current[i] = el }}
-                  style={{ width: colWidths[h] ?? 180 }}
-                />
-              ))}
-            </colgroup>
-            <thead className="sticky top-0 z-10">
-              <tr className="bg-[#f0f0f0] border-b border-[#e5e7eb]">
-                <th className="text-left px-4 py-2.5 text-[11px] font-medium text-[#9ca3af] border-r border-[#e5e7eb]/60 select-none">#</th>
-                {tableDisplay.headers.map((h, i) => {
-                  const w = colWidths[h] ?? 180
-                  return (
-                    <th
-                      key={h}
-                      className="text-left px-4 py-2.5 text-[11px] font-medium text-[#6b7280] whitespace-nowrap border-r border-[#e5e7eb]/60 last:border-r-0 relative select-none overflow-hidden"
-                    >
-                      <span className="block truncate">{h}</span>
-                      {/* Resize handle — pointerdown starts drag; move/up handled on window */}
-                      <div
-                        className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-[#111827]/15 active:bg-[#111827]/25"
-                        onPointerDown={e => {
-                          e.preventDefault()
-                          resizeDrag.current = { header: h, colIndex: i, startX: e.clientX, startWidth: w, currentWidth: w }
-                          ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
-                        }}
-                      />
-                    </th>
-                  )
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredRows.map((row, i) => (
-                <tr key={i} className="border-b border-[#f3f4f6] hover:bg-white transition-colors">
-                  <td className="px-4 py-2 text-[11px] text-[#9ca3af] tabular-nums border-r border-[#e5e7eb]/60 select-none overflow-hidden">{i + 1}</td>
-                  {tableDisplay.headers.map(h => (
-                    <td
-                      key={h}
-                      className="px-4 py-2 text-[13px] text-[#374151] whitespace-nowrap border-r border-[#e5e7eb]/60 last:border-r-0 overflow-hidden"
-                      title={row[h]}
-                    >
-                      <span className="block truncate">{row[h] || <span className="text-[#d1d5db]">—</span>}</span>
-                    </td>
-                  ))}
-                </tr>
-              ))}
-              {/* Scroll status row — hidden while search is active */}
-              {!searchQuery && (tableDisplay.hasMore || atDisplayCap || rawViewCapped) && (
-                <tr>
-                  <td
-                    colSpan={(tableDisplay.headers.length || 1) + 1}
-                    className="px-4 py-3 text-center text-[12px] text-[#9ca3af]"
-                  >
-                    {tableDisplay.hasMore
-                      ? 'Scroll to load more…'
-                      : rawViewCapped
-                      ? `Raw view shows first ${PREVIEW_LIMIT.toLocaleString()} of ${data.rowCount.toLocaleString()} rows — select a platform above to preview and export all rows`
-                      : `Showing ${MAX_DISPLAY_ROWS.toLocaleString()} of ${data.rowCount.toLocaleString()} rows — export includes all`}
-                  </td>
-                </tr>
+        {/* Table */}
+        <main className="flex-1 overflow-auto relative" onScroll={handleScroll}>
+          {isDisplayLoading ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-[#f5f5f5]">
+              <Loader2 className="w-6 h-6 text-[#9ca3af] animate-spin" />
+            </div>
+          ) : (
+            <>
+              {belowMinimum && (
+                <div className="sticky top-0 z-20 bg-[#fffbeb] border-b border-[#fcd34d] px-4 py-2 text-[12px] text-[#92400e]">
+                  {selectedPlatform!.label} requires a minimum of {minRows.toLocaleString()} rows per audience file — this file has only {uploadData.canonicalRows.length.toLocaleString()} {uploadData.canonicalRows.length === 1 ? 'row' : 'rows'} and the audience will not serve.
+                </div>
               )}
-            </tbody>
-          </table>
-          </>
-        )}
-      </main>
+              {platform === 'twitter' && (
+                <div className="sticky top-0 z-20 bg-[#f0f9ff] border-b border-[#bae6fd] px-4 py-2 text-[12px] text-[#0369a1]">
+                  X (Twitter) Ads accepts all identifier types in one file. During upload you&rsquo;ll map each column to its type (Email Address, Phone Number, Mobile Ad ID) — select <em>Do not upload data</em> for any column you want to skip.
+                </div>
+              )}
+              <table className="border-collapse" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
+                <colgroup>
+                  <col style={{ width: 40 }} />
+                  {tableDisplay.headers.map((h, i) => (
+                    <col
+                      key={h}
+                      ref={el => { colRefs.current[i] = el }}
+                      style={{ width: colWidths[h] ?? 180 }}
+                    />
+                  ))}
+                </colgroup>
+                <thead className="sticky top-0 z-10">
+                  <tr className="bg-[#f0f0f0] border-b border-[#e5e7eb]">
+                    <th className="text-left px-4 py-2.5 text-[11px] font-medium text-[#9ca3af] border-r border-[#e5e7eb]/60 select-none">#</th>
+                    {tableDisplay.headers.map((h, i) => {
+                      const w = colWidths[h] ?? 180
+                      return (
+                        <th
+                          key={h}
+                          className="text-left px-4 py-2.5 text-[11px] font-medium text-[#6b7280] whitespace-nowrap border-r border-[#e5e7eb]/60 last:border-r-0 relative select-none overflow-hidden"
+                        >
+                          <span className="block truncate">{h}</span>
+                          <div
+                            className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-[#111827]/15 active:bg-[#111827]/25"
+                            onPointerDown={e => {
+                              e.preventDefault()
+                              resizeDrag.current = { header: h, colIndex: i, startX: e.clientX, startWidth: w, currentWidth: w }
+                              ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+                            }}
+                          />
+                        </th>
+                      )
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRows.map((row, i) => (
+                    <tr key={i} className="border-b border-[#f3f4f6] hover:bg-white transition-colors">
+                      <td className="px-4 py-2 text-[11px] text-[#9ca3af] tabular-nums border-r border-[#e5e7eb]/60 select-none overflow-hidden">{i + 1}</td>
+                      {tableDisplay.headers.map(h => (
+                        <td
+                          key={h}
+                          className="px-4 py-2 text-[13px] text-[#374151] whitespace-nowrap border-r border-[#e5e7eb]/60 last:border-r-0 overflow-hidden"
+                          title={row[h]}
+                        >
+                          <span className="block truncate">{row[h] || <span className="text-[#d1d5db]">—</span>}</span>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                  {!searchQuery && (tableDisplay.hasMore || atDisplayCap || rawViewCapped) && (
+                    <tr>
+                      <td
+                        colSpan={(tableDisplay.headers.length || 1) + 1}
+                        className="px-4 py-3 text-center text-[12px] text-[#9ca3af]"
+                      >
+                        {tableDisplay.hasMore
+                          ? 'Scroll to load more…'
+                          : rawViewCapped
+                          ? `Raw view shows first ${PREVIEW_LIMIT.toLocaleString()} of ${uploadData.rowCount.toLocaleString()} rows — select a platform above to preview and export all rows`
+                          : `Showing ${MAX_DISPLAY_ROWS.toLocaleString()} of ${uploadData.rowCount.toLocaleString()} rows — export includes all`}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </>
+          )}
+        </main>
         </>
       )}
     </div>
