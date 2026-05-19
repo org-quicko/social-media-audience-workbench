@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Background: dark rounded square -->
+  <rect width="1024" height="1024" rx="230" fill="#111827"/>
+  <!-- UsersRound icon, scaled from 24x24 to ~560x560, centered at (512,480) -->
+  <!-- scale=23.3, translate so 24x24 icon center (12,12) maps to (512,490) -->
+  <!-- tx = 512 - 12*23.3 = 232.4, ty = 490 - 12*23.3 = 210.4 -->
+  <g transform="translate(232, 196) scale(23.3)"
+     stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M18 21a8 8 0 0 0-16 0"/>
+    <circle cx="10" cy="8" r="5"/>
+    <path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/>
+  </g>
+</svg>

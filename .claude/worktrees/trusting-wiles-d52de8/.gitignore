@@ -10,10 +10,6 @@
 !.yarn/releases
 !.yarn/versions
 
-.playwright-mcp
-.playwright-cli
-
-test-data
 # testing
 /coverage
 
@@ -43,6 +39,3 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-# electron-builder output
-/dist-electron/

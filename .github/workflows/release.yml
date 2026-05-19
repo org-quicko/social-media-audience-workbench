@@ -1,0 +1,50 @@
+name: Release
+
+# Trigger when a version tag is pushed: git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    strategy:
+      matrix:
+        # Each platform must build natively — cross-compilation is unreliable
+        include:
+          - os: windows-latest
+            artifact: '*.exe'
+          - os: macos-latest
+            artifact: '*.dmg'
+          - os: ubuntu-latest
+            artifact: '*.AppImage'
+
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: write   # needed to create/upload GitHub Release assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Linux needs these libraries for electron-builder to produce AppImage
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libarchive-tools
+
+      - name: Build Next.js static export + package with electron-builder
+        run: npm run electron:dist
+        env:
+          # electron-builder uses GH_TOKEN to create the GitHub Release and
+          # upload artifacts. GITHUB_TOKEN is automatically provided by Actions.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

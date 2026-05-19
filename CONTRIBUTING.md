@@ -1,24 +1,16 @@
-@AGENTS.md
+# Contributing / Building from source
 
-# Ads Audience Workbench
-
-Electron desktop app that transforms customer CSVs into ad-platform-ready audience files for Meta, Google, LinkedIn, and X (Twitter) Ads. All processing is local — no data ever leaves the machine.
-
-**Why it exists:** Quicko uploads customer lists to ad platforms for retargeting. Platforms silently reject non-compliant files and take 24–48h to process, so a failed upload wastes days. This tool validates and reformats before upload.
-
----
-
-## Running the app
+## Running the app locally
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Next.js dev server at localhost:3000 (browser only) |
-| `npm run electron:dev` | Starts Next.js + Electron together |
+| `npm run electron:dev` | Starts Next.js + Electron together (use this for development) |
+| `npm run dev` | Next.js dev server at localhost:3000 (browser only, no Electron) |
 | `npm run electron:dist:mac` | Builds macOS DMGs (x64 + arm64) into `dist-electron/` |
 | `npm run electron:dist:win` | Builds Windows NSIS installer — must run on Windows or a Windows CI runner |
 | `npm run build` | Next.js static export to `out/` only, no Electron packaging |
 
-`next start` does not work — the app uses `output: 'export'` (static). Use `electron:dev` or open the packaged app.
+> `next start` does not work — the app uses `output: 'export'` (static). Use `electron:dev` or open the packaged app.
 
 ---
 
@@ -50,7 +42,7 @@ src/
       name.ts         ← splitName() splits "First Last" into parts
       sanitize.ts     ← strips "null", "n/a", "unknown", "-", etc.
   components/
-    ui/               ← shadcn/ui primitives (button, select, etc.) — do not edit directly
+    ui/               ← shadcn/ui primitives (button, select, etc.)
 electron/
   main.js             ← Electron main process
 ```
@@ -86,9 +78,9 @@ Checked in this order against the CSV headers:
 
 **Google** — headers: `Email First Name Last Name Country Zip Phone`. Only non-empty columns written.
 
-**LinkedIn** — headers: `email phone firstname lastname jobtitle employeecompany country googleaid`. Hard row limit: **300,000 rows/file** (documented LinkedIn Ads constraint). Files over this are auto-split and bundled into a ZIP.
+**LinkedIn** — headers: `email phone firstname lastname jobtitle employeecompany country googleaid`. Hard row limit: **300,000 rows/file**. Files over this are auto-split and bundled into a ZIP.
 
-**X (Twitter)** — headers: `email phone madid` (only identifier types present in the data). During the Twitter upload UI users map each column to its identifier type — descriptive column names matter here.
+**X (Twitter)** — headers: `email phone madid` (only identifier types present in the data). During the Twitter upload UI, users map each column to its identifier type — descriptive column names matter here.
 
 ---
 
@@ -110,3 +102,14 @@ Checked in this order against the CSV headers:
 - Windows builds must be run on Windows (or a Windows CI runner) — electron-builder cannot cross-compile from macOS.
 
 ---
+
+## Releasing
+
+Push a version tag to trigger the CI build and publish a GitHub Release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub Actions will build `.dmg` (x64 + arm64), `.exe`, and `.AppImage` in parallel and attach them to the release automatically.
