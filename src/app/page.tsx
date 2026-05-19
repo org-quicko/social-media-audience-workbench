@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import {
   Select, SelectContent, SelectItem, SelectTrigger,
 } from '@/components/ui/select'
-import { Upload, UsersRound, Download, Loader2, X, Search } from 'lucide-react'
+import { Upload, UsersRound, Download, Loader2, X, Search, TriangleAlert } from 'lucide-react'
 import { CanonicalRow, ColumnMapping, PlatformFile, PlatformType } from '@/lib/types'
 import {
   detectJsonColumns, buildSourceColumns, autoDetectMapping, parseGenericRow,
@@ -510,6 +510,11 @@ export default function Home() {
   const rawViewCapped = !!uploadData && platform === null && !tableDisplay.hasMore && uploadData.rowCount > PREVIEW_LIMIT
   const minRows = platform !== null ? PLATFORM_MIN_ROWS[platform] : 0
   const belowMinimum = !!uploadData && platform !== null && uploadData.canonicalRows.length < minRows
+  const missingIdentifiers = useMemo(() => {
+    if (!uploadData) return false
+    const sample = uploadData.canonicalRows.slice(0, 1000)
+    return !sample.some(row => row.email || row.phone || row.first_name || row.last_name)
+  }, [uploadData])
 
   let exportLabel = 'Export CSV'
   if (isExporting) {
@@ -536,7 +541,7 @@ export default function Home() {
       {upload.status === 'reading' && (
         <>
           <header className="bg-white border-b border-border px-6 h-14 flex items-center">
-            <span className="text-sm font-semibold text-[#111827]">Ads Audience Workbench</span>
+            <span className="text-sm font-semibold text-[#111827]">Social Media Audience Workbench</span>
           </header>
           <main className="flex-1 flex flex-col items-center justify-center gap-3">
             <Loader2 className="w-7 h-7 text-[#9ca3af] animate-spin" />
@@ -549,7 +554,7 @@ export default function Home() {
       {(upload.status === 'idle' || upload.status === 'error') && (
         <>
           <header className="bg-white border-b border-border px-6 h-14 flex items-center">
-            <span className="text-sm font-semibold text-[#111827]">Ads Audience Workbench</span>
+            <span className="text-sm font-semibold text-[#111827]">Social Media Audience Workbench</span>
           </header>
           <main
             className="flex-1 flex flex-col items-center justify-center gap-5"
@@ -605,7 +610,7 @@ export default function Home() {
               onClick={clearData}
               className="text-sm font-semibold text-[#111827] hover:text-[#374151] transition-colors"
             >
-              Ads Audience Workbench
+              Social Media Audience Workbench
             </button>
             <span className="text-[#d1d5db]">/</span>
             <span className="text-sm text-[#6b7280]">{uploadData.fileName}</span>
@@ -712,6 +717,12 @@ export default function Home() {
             </div>
           ) : (
             <>
+              {missingIdentifiers && (
+                <div className="sticky top-0 z-20 bg-[#fffbeb] border-b border-[#fcd34d] px-4 py-2 text-[12px] text-[#92400e] flex items-center gap-2">
+                  <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
+                  No email, phone, or name columns were detected. Ad platforms need at least one identifier to match users — check that your CSV has clearly labelled column headers.
+                </div>
+              )}
               {belowMinimum && (
                 <div className="sticky top-0 z-20 bg-[#fffbeb] border-b border-[#fcd34d] px-4 py-2 text-[12px] text-[#92400e]">
                   {selectedPlatform!.label} requires a minimum of {minRows.toLocaleString()} rows per audience file — this file has only {uploadData.canonicalRows.length.toLocaleString()} {uploadData.canonicalRows.length === 1 ? 'row' : 'rows'} and the audience will not serve.

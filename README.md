@@ -1,4 +1,4 @@
-# Ads Audience Workbench
+# Social Media Audience Workbench
 
 A desktop app that converts customer CSV exports into ad-platform-ready audience files for Meta, Google, LinkedIn, and X (Twitter) Ads — in seconds, entirely on your machine. No data is uploaded anywhere.
 
@@ -12,9 +12,9 @@ Go to [**Releases**](../../releases/latest) and download the file for your OS:
 
 | Platform | File |
 |---|---|
-| macOS (Apple Silicon) | `Ads.Audience.Workbench-*-arm64.dmg` |
-| macOS (Intel) | `Ads.Audience.Workbench-*-x64.dmg` |
-| Windows | `Ads.Audience.Workbench-*-Setup.exe` |
+| macOS (Apple Silicon) | `Social.Media.Audience.Workbench-*-arm64.dmg` |
+| macOS (Intel) | `Social.Media.Audience.Workbench-*-x64.dmg` |
+| Windows | `Social.Media.Audience.Workbench-*-Setup.exe` |
 
 No installation of Node.js, Python, or any other runtime is required.
 
@@ -38,7 +38,30 @@ The app auto-detects the format of your input file:
 - **Listmonk** subscriber exports
 - **Zoho CRM** contacts exports
 - **PostHog** persons exports
-- **Generic CSV** — any file with recognisable column names (email, phone, first name, etc.)
+- **Generic CSV** — any file with recognisable column names
+
+---
+
+## CSV format
+The app looks for columns with these names (case-insensitive, partial matches allowed):
+
+| Data | Expected column name(s) |
+|---|---|
+| Email address | `email`, `e-mail`, `email address` |
+| Phone number | `phone`, `mobile`, `phone number` |
+| First name | `first name`, `firstname`, `first_name` |
+| Last name | `last name`, `lastname`, `last_name` |
+| Full name | `name`, `full name`, `full_name` |
+| Country | `country`, `country code` |
+| City | `city` |
+| State / province | `state`, `province`, `region` |
+| Postcode / ZIP | `zip`, `postcode`, `postal code` |
+| Date of birth | `dob`, `date of birth`, `birthday` |
+| Gender | `gender`, `sex` |
+| Job title | `job title`, `job_title`, `title` |
+| Company | `company`, `employer`, `organization` |
+
+At least one of **email**, **phone**, or **name** should be present — ad platforms require at least one identifier to match users. Columns that are entirely empty are automatically dropped from the output.
 
 ---
 

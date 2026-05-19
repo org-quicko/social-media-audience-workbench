@@ -5,7 +5,7 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  title: "Ads Audience Workbench",
+  title: "Social Media Audience Workbench",
   description: "Transform customer CSVs into ad platform-ready audience files",
 };
 

@@ -1,6 +1,6 @@
 @AGENTS.md
 
-# Ads Audience Workbench
+# Social Media Audience Workbench
 
 Electron desktop app that transforms customer CSVs into ad-platform-ready audience files for Meta, Google, LinkedIn, and X (Twitter) Ads. All processing is local — no data ever leaves the machine.
 
