@@ -1,6 +1,6 @@
 {
   "name": "social-media-audience-workbench",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Transform customer CSVs into ad platform-ready audience files for Meta, Google, LinkedIn, and X",
   "author": "Quicko",
