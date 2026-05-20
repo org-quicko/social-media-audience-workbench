@@ -23,7 +23,7 @@ const STORAGE_KEY = 'workbench_csv_v2'
 const PREVIEW_LIMIT = 5_000
 const DISPLAY_PAGE = 500
 const MAX_DISPLAY_ROWS = 20_000
-const JSON_DETECT_SAMPLE = 20
+const JSON_DETECT_SAMPLE = 500
 
 /**
  * Maximum rows per downloaded file for each platform.
