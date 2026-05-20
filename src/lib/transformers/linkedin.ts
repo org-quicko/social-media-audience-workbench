@@ -21,7 +21,7 @@ export function transformLinkedIn(rows: CanonicalRow[]): PlatformFile {
 
   return {
     filename: 'linkedin_audience.csv',
-    content: toCsv(output, LINKEDIN_HEADERS),
+    content: toCsv(output, LINKEDIN_HEADERS, false),
     rowCount: output.length,
   }
 }
