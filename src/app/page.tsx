@@ -21,7 +21,7 @@ import { transformTwitter } from '@/lib/transformers/twitter'
 
 const STORAGE_KEY = 'workbench_csv_v2'
 const PREVIEW_LIMIT = 5_000
-const DISPLAY_PAGE = 500
+const DISPLAY_PAGE = 1000
 const MAX_DISPLAY_ROWS = 20_000
 const JSON_DETECT_SAMPLE = 500
 
