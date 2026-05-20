@@ -142,5 +142,12 @@ export function parseGenericRow(
     if (last_name && !result.last_name) result.last_name = last_name
   }
 
+  // Drop name values that are actually email addresses (dirty source data where
+  // a contact filled their "name" field with an email). Leaving them in causes
+  // platform uploads to fail — e.g. LinkedIn rejects rows where firstname
+  // contains an @ character.
+  if (result.first_name?.includes('@')) delete result.first_name
+  if (result.last_name?.includes('@')) delete result.last_name
+
   return result
 }
